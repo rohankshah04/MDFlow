@@ -17,8 +17,7 @@ from openfold.utils.feats import (
     atom14_to_atom37,
 )
 from openfold.utils.tensor_utils import add
-from .input_stack import InputPairStack
-from .layers import GaussianFourierProjection
+
 from openfold.model.primitives import Linear
 
 
@@ -31,7 +30,7 @@ class AlphaFold(nn.Module):
     2) evoformer, recycling module
     '''
 
-    def __init__(self, config, extra_input=False):
+    def __init__(self, config):
         """
         Args:
             config:
@@ -77,23 +76,14 @@ class AlphaFold(nn.Module):
             self.config.evoformer_stack.c_z,
             init="final",
         )
-        self.input_time_projection = GaussianFourierProjection(
-            embedding_size=self.config.input_pair_embedder.time_emb_dim
-        )
+        
         self.input_time_embedding = Linear(
             self.config.input_pair_embedder.time_emb_dim, 
             self.config.evoformer_stack.c_z,
             init="final",
         )
-        self.input_pair_stack = InputPairStack(**self.config.input_pair_stack)
-        self.extra_input = extra_input
-        if extra_input:
-            self.extra_input_pair_embedding = Linear(
-                self.config.input_pair_embedder.no_bins, 
-                self.config.evoformer_stack.c_z,
-                init="final",
-            )   
-            self.extra_input_pair_stack = InputPairStack(**self.config.input_pair_stack)
+        
+        
         
         ################
 
