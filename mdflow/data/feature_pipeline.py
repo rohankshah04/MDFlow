@@ -20,7 +20,7 @@ import ml_collections
 import numpy as np
 import torch
 
-from . import input_pipeline
+from ..model import input_pipeline
 
 
 FeatureDict = Mapping[str, np.ndarray]
