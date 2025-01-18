@@ -1,8 +1,7 @@
-### file @parsa for the model wrapper stuff
-
-#from .utils.logging import get_logger
-#add logger
+import logging
+import sys
 logger = get_logger(__name__)
+
 import torch, os, wandb, time
 import pandas as pd
 
@@ -42,10 +41,10 @@ class Model(pl.LightningModule):
         batch_dims = batch['all_atom_positions'].shape
         ny = self.harmonic_prior.sample(batch_dims)
         t = torch.rand(batch_dims, device=device)
-        noisy_beta = (1 - t[:,None,None]) * batch['all_atom_position'] + t[:,None,None] * ny
+        noisy = (1 - t[:,None,None]) * batch['all_atom_position'] + t[:,None,None] * ny
         
-        pseudo_beta_dists = torch.sum((noisy_beta.unsqueeze(-2) - noisy_beta.unsqueeze(-3)) ** 2, dim=-1)**0.5
-        batch['noised_pseudo_beta_dists'] = pseudo_beta_dists
+        # dists = torch.sum((noisy.unsqueeze(-2) - noisy.unsqueeze(-3)) ** 2, dim=-1)**0.5
+        batch['noised_coords'] = noisy
         batch['t'] = t
     
     def training_step(self, batch, batch_idx):

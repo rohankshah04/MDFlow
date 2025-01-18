@@ -1,0 +1,16 @@
+no change     /cbica/software/external/python/anaconda/3/condabin/conda
+no change     /cbica/software/external/python/anaconda/3/bin/conda
+no change     /cbica/software/external/python/anaconda/3/bin/conda-env
+no change     /cbica/software/external/python/anaconda/3/bin/activate
+no change     /cbica/software/external/python/anaconda/3/bin/deactivate
+no change     /cbica/software/external/python/anaconda/3/etc/profile.d/conda.sh
+no change     /cbica/software/external/python/anaconda/3/etc/fish/conf.d/conda.fish
+no change     /cbica/software/external/python/anaconda/3/shell/condabin/Conda.psm1
+no change     /cbica/software/external/python/anaconda/3/shell/condabin/conda-hook.ps1
+no change     /cbica/software/external/python/anaconda/3/lib/python3.6/site-packages/xontrib/conda.xsh
+no change     /cbica/software/external/python/anaconda/3/etc/profile.d/conda.csh
+no change     /cbica/home/shahroha/.bashrc
+No action taken.
+Downloading 16pk_A/ to /scratch/shahroha/SLURM_5047623/tmpukdyg1td
+Downloading 1a62_A/ to /scratch/shahroha/SLURM_5047623/tmpzc58joi4
+Processing data from: /scratch/shahroha/SLURM_5047623/tmpukdyg1td
