@@ -51,7 +51,7 @@ class Model(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         self.iter_step += 1
         device = batch[0]["aatype"].device
-        batch_size = batch[0['aatype'].shape[0]
+        batch_size = batch[0]['aatype'].shape[0]
         self.harmonic_prior.to(device)
         self.stage = 'train'
         if not self.args.no_ema:
@@ -80,7 +80,7 @@ class Model(pl.LightningModule):
         loss, loss_breakdown = self.loss(outputs, batch[1], _return_breakdown=True)
 
         with torch.no_grad():
-            metrics = self._compute_validation_metrics(batch, outputs, superimposition_metrics=False)
+            metrics = self._compute_validation_metrics(batch[1], outputs, superimposition_metrics=False)
         
         
         for k, v in loss_breakdown.items():
