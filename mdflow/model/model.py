@@ -1,7 +1,8 @@
-import logging
-import sys
-logger = get_logger(__name__)
+### file @parsa for the model wrapper stuff
 
+#from .utils.logging import get_logger
+#add logger
+logger = get_logger(__name__)
 import torch, os, wandb, time
 import pandas as pd
 
@@ -41,16 +42,14 @@ class Model(pl.LightningModule):
         batch_dims = batch['all_atom_positions'].shape
         ny = self.harmonic_prior.sample(batch_dims)
         t = torch.rand(batch_dims, device=device)
-        noisy = (1 - t[:,None,None]) * batch['all_atom_position'] + t[:,None,None] * ny
+        noised_structure = (1 - t[:,None,None]) * batch['all_atom_position'] + t[:,None,None] * ny
         
-        # dists = torch.sum((noisy.unsqueeze(-2) - noisy.unsqueeze(-3)) ** 2, dim=-1)**0.5
-        batch['noised_coords'] = noisy
+        batch['noised_structre'] = noised_structure
         batch['t'] = t
     
     def training_step(self, batch, batch_idx):
         self.iter_step += 1
         device = batch[0]["aatype"].device
-        batch_size = batch[0]['aatype'].shape[0]
         self.harmonic_prior.to(device)
         self.stage = 'train'
         if not self.args.no_ema:
@@ -73,6 +72,8 @@ class Model(pl.LightningModule):
         if torch.rand(1, generator=self.generator).item() < self.args.self_cond_prob:  
             with torch.no_grad():
                 outputs = self.model(batch[0])
+
+        batch['temp_pos'] = batch_idx
         
         outputs = self.model(batch[0], prev_outputs=outputs)
 
@@ -96,24 +97,15 @@ class Model(pl.LightningModule):
             if(self.cached_weights is None):
                 self.load_ema_weights()
             
-        if self.args.normal_validate:
-            self.training_step(batch, batch_idx, 'val')
-            if self.args.validate:
-                self.try_print_log()
-            return 
-            
+        
         self.iter_step += 1
         self.stage = 'val'
-        # At the start of validation, load the EMA weights
             
         ref_prot = batch['ref_prot'][0]
         
         pred_prots = []
         for _ in range(self.args.val_samples):
-            if self.args.distillation:
-                prots = self.inference(batch, no_diffusion=True, noisy_first=True, as_protein=True)
-            else:
-                prots = self.inference(batch, as_protein=True)
+            prots = self.inference(batch, as_protein=True)
             pred_prots.append(prots[-1])
 
         first_metrics = protein.global_metrics(ref_prot, prots[0])
@@ -143,6 +135,68 @@ class Model(pl.LightningModule):
         
         if self.args.validate:
             self.try_print_log()
+
+    def restore_cached_weights(self):
+        logger.info('Restoring cached weights')
+        self.model.load_state_dict(self.cached_weights)
+        self.cached_weights = None
+
+    def load_ema_weights(self):
+        # model.state_dict() contains references to model weights rather
+        # than copies. Therefore, we need to clone them before calling 
+        # load_state_dict().
+        logger.info('Loading EMA weights')
+        clone_param = lambda t: t.detach().clone()
+        self.cached_weights = tensor_tree_map(clone_param, self.model.state_dict())
+        self.model.load_state_dict(self.ema.state_dict()["params"])
+        
+    
+    def inference(self, batch, as_protein=False, no_diffusion=False, self_cond=True, noisy_first=False, schedule=None):
+        device = batch['aatype'].device
+        batch_dims = batch['all_atom_positions'].shape
+        ny = HarmonicPrior.sample(batch_dims)
+        # t = torch.rand(batch_dims, device=device)
+        # noised_structure = (1 - t[:,None,None]) * batch['all_atom_position'] + t[:,None,None] * ny
+        
+        
+
+
+        if noisy_first:
+            batch['noised_structure'] = ny
+            batch['t'] = torch.ones(1, device=noisy.device)
+            
+
+                 
+        if no_diffusion:
+            output = self.model(batch)
+            if as_protein:
+                return protein.output_to_protein({**output, **batch})
+            else:
+                return [{**output, **batch}]
+
+        if schedule is None:
+            schedule = np.array([1.0, 0.75, 0.5, 0.25, 0.1, 0]) 
+        outputs = []
+        prev_outputs = None
+        for t, s in zip(schedule[:-1], schedule[1:]):
+            output = self.model(batch, prev_outputs=prev_outputs)
+            outputs.append({**output, **batch})
+            
+            ny = (s / t) * ny + (1 - s / t) * batch['all_atom_position']
+            batch['noised_struture'] = ny
+            batch['t'] = torch.ones(1, device=ny.device) * s # first one doesn't get the time embedding, last one is ignored :)
+            if self_cond:
+                prev_outputs = output
+
+        del batch['noised_structure'], batch['t']
+        if as_protein:
+            prots = []
+            for output in outputs:
+                prots.extend(protein.output_to_protein(output))
+            return prots
+        else:
+            return outputs
+
 
 
 
