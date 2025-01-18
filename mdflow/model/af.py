@@ -227,10 +227,11 @@ class AlphaFold(nn.Module):
 
         temp_pos = batch['temp_pos']
         temp_pos_z = torch.ones_like(z) * temp_pos
-        temp_pos_m = torch.ones_like(m) * temp_pos
-
+        temp_pos_m = torch.ones_like(m[..., 0, :, :]) * temp_pos
+        
+        m[..., 0, :, :] += temp_pos_m
         z = add(z, temp_pos_z, inplace=inplace_safe)
-        m = add(m, temp_pos_m, inplace=inplace_safe)
+        
 
 
 
