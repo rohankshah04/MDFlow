@@ -1,11 +1,28 @@
-###############################################################################
-# modified AlphaFold-like architecture with:
-#  - input_embedder (no recycling)
-#  - nx_transformer_block (recycling + evoformer + structure)
+# Copyright 2021 AlQuraishi Laboratory
+# Copyright 2021 DeepMind Technologies Limited
 #
-# We use recycling in the transformer block so structure updates can be
-# learned over time (e.g., for flow matching or "movie" generation tasks).
-###############################################################################
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# some changes from above to isolate different parts.
+
+import sys
+import logging
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+stream_handler = logging.StreamHandler(sys.stdout)
+stream_handler.setLevel(logging.INFO)
+logger.addHandler(stream_handler)
 
 import torch
 import torch.nn as nn
@@ -28,8 +45,7 @@ from openfold.utils.feats import (
 )
 from openfold.utils.tensor_utils import add
 
-from utils import InputPairStack, GaussianFourierProjection, Linear
-
+from misc import InputPairStack, GaussianFourierProjection, Linear
 
 # -------------------------------------------------------------------
 # INPUT EMBEDDER (NO RECYCLING)
@@ -137,6 +153,7 @@ def nx_transformer_block(
         extra_msa_stack = ExtraMSAStack(
             **config["extra_msa"]["extra_msa_stack"]
         )
+        logger.info("feats from msa:", feats.keys())
         a = extra_msa_embedder(build_extra_msa_feat(feats))
         z = extra_msa_stack(
             a, z,

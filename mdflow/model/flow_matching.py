@@ -75,10 +75,9 @@ def train_step_flow_matching(
     add_noise=False
 ):
     """
-    A single training step for flow matching with the
-    MovieGenAlphaFold or FlowMatchingModel. This:
+    a single training step for MDFlow
       1) Moves data to device
-      2) (Optionally) adds noise to coords_t
+      2) adds noise to coords_t
       3) Runs model forward pass
       4) Computes flow-matching loss
       5) Backprops + step

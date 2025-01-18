@@ -1,109 +1,136 @@
 #!/usr/bin/env python3
 """
+af_test_inf.py
+
 Demonstration script for:
  - Loading a config from `config.py`
- - Instantiating our AlphaFold model
- - Loading *pretrained weights* from a checkpoint
- - Running a forward pass on synthetic data
+ - Replacing placeholders (NUM_RES, NUM_MSA_SEQ, etc.) within the config
+ - Creating mock features based on the newly updated config
+ - Running a forward pass on the AlphaFold model
 """
 
-import os
+import sys
+import logging
 import torch
 import ml_collections as mlc
 
+# Adjust these imports to match your own file structure/package names
 from config import model_config
 from af import AlphaFold
 
+def set_config_shapes(
+cfg: mlc.ConfigDict,
+num_res: int = 10,
+num_msa_seq: int = 3,
+num_extra_seq: int = 2,
+num_templates: int = 4,
+):
+    feat_shapes = cfg.data.common.feat
+    logger.info(f"Original feat shapes: {feat_shapes.keys()}")
 
-def load_pretrained_weights(model: torch.nn.Module, ckpt_path: str) -> None:
+    # Update shapes for target features
+    feat_shapes["target_feat"] = [num_res, None]
+    feat_shapes["aatype"] = [num_res]
+    feat_shapes["msa_feat"] = [num_msa_seq, num_res, cfg.model.input_embedder.msa_dim]
+    feat_shapes["residue_index"] = [num_res]
+    feat_shapes["seq_mask"] = [num_res]
+    feat_shapes["msa_mask"] = [num_msa_seq, num_res]
+    feat_shapes["extra_msa_mask"] = [num_extra_seq, num_res]
+
+    # Template features
+    feat_shapes["template_aatype"] = [num_templates, num_res]
+    feat_shapes["template_all_atom_mask"] = [num_templates, num_res, 37]
+    feat_shapes["template_all_atom_positions"] = [num_templates, num_res, 37, 3]
+
+    # Atom-level features
+    feat_shapes["atom37_atom_exists"] = [num_res, 37]
+
+    logger.info(f"Updated feat shapes: {feat_shapes}")
+    return cfg
+
+def make_mock_feats_from_config(cfg: mlc.ConfigDict, batch_size=1):
     """
-    Load pretrained weights from a local checkpoint file.
-    Adjust logic if your checkpoint has a different structure.
-    E.g., if the checkpoint is a dictionary with keys like
-    ['model', 'optimizer', 'ema'], you might do:
-
-    checkpoint = torch.load(ckpt_path, map_location="cpu")
-    model.load_state_dict(checkpoint["model"], strict=True)
-
-    or if it's already a direct state dict, just load that.
+    Generates mock features as tensors based on the config shapes.
     """
-    if not os.path.exists(ckpt_path):
-        raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
+    feat_shapes = cfg.data.common.feat
+    feats = {}
 
-    checkpoint = torch.load(ckpt_path, map_location="cpu")
+    for feat_name, shape_list in feat_shapes.items():
+        if not shape_list or not isinstance(shape_list, list):
+            # Skip invalid or empty feature shapes
+            logger.warning(f"Skipping feature {feat_name} with invalid shape: {shape_list}")
+            continue
 
-    # This is a guess: many OpenFold checkpoints store weights under "model".
-    # Adjust if your checkpoint keys differ.
-    if "model" in checkpoint:
-        state_dict = checkpoint["model"]
-    else:
-        # If the checkpoint is already a raw state dict, just use it.
-        state_dict = checkpoint
+        # Ensure all dimensions in shape_list are integers, replace None with 1
+        try:
+            final_shape = [batch_size] + [
+                int(dim) if dim is not None else 1  # Replace None with a default value
+                for dim in shape_list
+            ]
+        except (TypeError, ValueError):
+            logger.error(f"Invalid shape for feature {feat_name}: {shape_list}")
+            continue
 
-    # Attempt to load
-    model.load_state_dict(state_dict, strict=True)
-    print(f"Loaded pretrained weights from {ckpt_path}")
+        # Determine data type for the feature
+        dtype = torch.float32
+        if feat_name in ["aatype", "template_aatype", "residue_index"]:
+            dtype = torch.long
 
-
-def make_mock_feats(batch_size=2, n_res=10, msa_depth=3):
-    """
-    Synthetic data shaped similarly to what OpenFold expects.
-    Adjust shapes as needed for your particular architecture.
-    """
-    c_target = 22 # typical for AF2's target features
-    c_msa = 49 # typical for AF2's MSA features
-
-    feats = {
-        "target_feat": torch.randn(batch_size, n_res, c_target),
-        "msa_feat": torch.randn(batch_size, msa_depth, n_res, c_msa),
-        "residue_index": torch.arange(n_res).unsqueeze(0).expand(batch_size, n_res),
-        "seq_mask": torch.ones(batch_size, n_res),
-        "msa_mask": torch.ones(batch_size, msa_depth, n_res),
-        "aatype": torch.zeros(batch_size, n_res, dtype=torch.int64),
-        "atom37_atom_exists": torch.ones(batch_size, n_res, 37),
-    }
-
+        # Create the mock tensor
+        if dtype == torch.long:
+            feats[feat_name] = torch.zeros(final_shape, dtype=dtype)
+        else:
+            feats[feat_name] = torch.randn(final_shape, dtype=dtype)
     return feats
 
-
 def main():
-    # 1) Create config via model_config
-    #    For example, pick "model_1". Adjust as needed.
-    cfg_name = "model_1"
-    c = model_config(name=cfg_name, train=False, low_prec=False)
 
-    # 2) Instantiate the AlphaFold model
-    model = AlphaFold(c)
-    model.eval() # inference mode
+    # 1) Load model config (e.g., "model_1")
+    cfg_name = "initial_training"
+    logger.info(f"Using config preset: {cfg_name}")
+    cfg = model_config(name=cfg_name, train=False, low_prec=False)
 
-    # 3) Load pretrained weights
-    #    If you have a checkpoint: "openfold_v1.pt" or similar
-    checkpoint_path = "openfold_v1.pt" # <--- Adjust to your checkpoint filename
-    load_pretrained_weights(model, checkpoint_path)
+    # 2) Replace placeholders in the config
+    cfg = set_config_shapes(
+        cfg,
+        num_res=10,
+        num_msa_seq=3,
+        num_extra_seq=2,
+        num_templates=4,
+    )
 
-    # 4) Create synthetic features for a test forward pass
-    feats = make_mock_feats(batch_size=2, n_res=10, msa_depth=3)
+    # 3) Instantiate the AlphaFold model
+    model = AlphaFold(cfg)
+    model.eval()
 
-    # 5) Forward pass (no previous recycling info)
+    # 4) Create mock features
+    feats = make_mock_feats_from_config(cfg, batch_size=2)
+
+    # 5) Forward pass (no recycling info)
     with torch.no_grad():
         outputs = model(feats, prev_outputs=None)
 
-    # 6) Print output shapes
-    print("Outputs keys:", list(outputs.keys()))
+    logger.info(f"Outputs keys: {list(outputs.keys())}")
     if "final_atom_positions" in outputs:
-        print("final_atom_positions:", outputs["final_atom_positions"].shape)
+        logger.info(f"final_atom_positions: {outputs['final_atom_positions'].shape}")
     if "msa" in outputs:
-        print("msa:", outputs["msa"].shape)
+        logger.info(f"msa: {outputs['msa'].shape}")
     if "pair" in outputs:
-        print("pair:", outputs["pair"].shape)
+        logger.info(f"pair: {outputs['pair'].shape}")
     if "single" in outputs:
-        print("single:", outputs["single"].shape)
+        logger.info(f"single: {outputs['single'].shape}")
 
-    # 7) Optional: second pass for recycling
+    # 6) Optional second pass for recycling
     with torch.no_grad():
         outputs_2 = model(feats, prev_outputs=outputs)
-    print("Second pass final_atom_positions:", outputs_2["final_atom_positions"].shape)
+        logger.info(
+            f"Second pass final_atom_positions: {outputs_2['final_atom_positions'].shape}")
 
 
 if __name__ == "__main__":
+    logger = logging.getLogger(__name__)
+    logger.setLevel(logging.INFO)
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setLevel(logging.INFO)
+    logger.addHandler(sh)
     main()

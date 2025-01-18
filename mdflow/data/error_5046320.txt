@@ -1,0 +1,10 @@
+FATAL: Missing required source file.
+  (1) Install package 'bash-completion'
+  (2) $ source /usr/share/bash-completion/bash_completion
+  (3) $ source slurm_completion.sh
+FATAL: Missing required source file.
+  (1) Install package 'bash-completion'
+  (2) $ source /usr/share/bash-completion/bash_completion
+  (3) $ source slurm_completion.sh
+/var/spool/slurmd/job5046320/slurm_script: line 17: /cbica/home/shahroha/anaconda3/etc/profile.d/conda.sh: No such file or directory
+slurmstepd: error: *** JOB 5046320 ON 2115fmn012 CANCELLED AT 2025-01-17T15:40:03 ***
