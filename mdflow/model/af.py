@@ -47,6 +47,46 @@ from openfold.utils.tensor_utils import add
 
 from misc import InputPairStack, GaussianFourierProjection, Linear
 
+
+def sinusoidal_time_embedding(time_values, embed_dim):
+    """
+    time_values: A 1D or 2D tensor of shape [B] or [B, 1] containing 
+                 the scalar time steps (e.g., temp_pos).
+    embed_dim:   int, must be even for sin/cos pairing to work easily.
+
+    Returns:
+        A tensor of shape [B, embed_dim] representing the 
+        non-learnable sinusoidal embedding for each time step.
+    """
+    if time_values.dim() == 1:
+        # Make sure shape is [B, 1]
+        time_values = time_values.unsqueeze(-1)  # [B, 1]
+
+    # Convert to float
+    time_values = time_values.float()
+
+    # We'll create the "angles" used for sin/cos
+    half_dim = embed_dim // 2
+    # exponents: [0..half_dim-1]
+    exponents = torch.arange(half_dim, device=time_values.device).float()
+
+    # typical Transformer approach for frequencies:
+    #  1 / (10000^(2*i / embed_dim))
+    div_term = torch.exp(-math.log(10000.0) * (2 * exponents / embed_dim))
+
+    # Make shape [1, half_dim] for broadcasting
+    div_term = div_term.unsqueeze(0)  # [1, half_dim]
+
+    # Now multiply the time values by the frequencies
+    angles = time_values * div_term  # [B, half_dim]
+
+    sin_part = torch.sin(angles)     # [B, half_dim]
+    cos_part = torch.cos(angles)     # [B, half_dim]
+
+    # Concatenate sin and cos to form the full embedding: [B, embed_dim]
+    time_emb = torch.cat([sin_part, cos_part], dim=-1)
+    return time_emb
+
 class AlphaFold(nn.Module):
     """
     Alphafold 2.
@@ -225,12 +265,24 @@ class AlphaFold(nn.Module):
         # [*, N, N, C_z]
         z = add(z, z_prev_emb, inplace=inplace_safe)
 
-        temp_pos = batch['temp_pos']
-        temp_pos_z = torch.ones_like(z) * temp_pos
-        temp_pos_m = torch.ones_like(m[..., 0, :, :]) * temp_pos
+
+        temp_pos = batch['temp_pos']  # shape [B] or [B, 1]
         
-        m[..., 0, :, :] += temp_pos_m
-        z = add(z, temp_pos_z, inplace=inplace_safe)
+        # let's assume your model config's c_z == c_m
+        c_z = self.config.evoformer_stack.c_z
+        # compute time embedding of shape [B, c_z]
+        time_emb = sinusoidal_time_embedding(temp_pos, c_z)  # [B, c_z]
+
+        # Expand to match z: [B, 1, 1, c_z]
+        time_emb_z = time_emb.unsqueeze(1).unsqueeze(1)
+        # z: [B, N, N, c_z]
+        z = add(z, time_emb_z, inplace=inplace_safe)
+
+        # Expand to match m[..., 0, :, :]: [B, N, c_m]
+        # which is [B, N, c_z] if c_m == c_z
+        time_emb_m = time_emb.unsqueeze(1)  # [B, 1, c_z]
+        # add to m[..., 0, :, :]
+        m[..., 0, :, :] += time_emb_m
         
 
 
