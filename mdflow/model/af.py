@@ -111,7 +111,7 @@ class AlphaFold(nn.Module):
         self.input_embedder = InputEmbedder(
             **self.config["input_embedder"],
         )
-        self.recycling_embedder = RecyclingEmbedder(
+        self.recycling_embedder = RecyclinegEmbedder(
             **self.config["recycling_embedder"],
         )
         
@@ -246,10 +246,12 @@ class AlphaFold(nn.Module):
         else:
             m_1_prev, z_prev, x_prev = prev_outputs['m_1_prev'], prev_outputs['z_prev'], prev_outputs['x_prev']
 
+        
         x_prev = pseudo_beta_fn(
-            feats["aatype"], x_prev, None
+            feats["aatype"], feats["noised_structure"], None
         ).to(dtype=z.dtype)
 
+     
         # m_1_prev_emb: [*, N, C_m]
         # z_prev_emb: [*, N, N, C_z]
         m_1_prev_emb, z_prev_emb = self.recycling_embedder(
