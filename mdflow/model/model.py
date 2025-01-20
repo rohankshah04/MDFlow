@@ -39,7 +39,7 @@ class Model(pl.LightningModule):
 
     def noise(self, batch):
         device = batch['aatype'].device
-        batch_dims = batch[''].shape
+        batch_dims = batch['all_atom_positions'].shape
         ny = self.harmonic_prior.sample(batch_dims)
         t = torch.rand(batch_dims, device=device)
         noised_structure = (1 - t[:,None,None]) * batch['all_atom_position'] + t[:,None,None] * ny
