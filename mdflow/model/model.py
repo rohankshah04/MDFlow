@@ -1,9 +1,5 @@
 ### file @parsa for the model wrapper stuff
-
-#from .utils.logging import get_logger
-#add logger
-logger = get_logger(__name__)
-import torch, os, wandb, time
+import torch, os, wandb, time, sys
 import pandas as pd
 
 from openfold.model.model import AlphaFold
@@ -32,14 +28,25 @@ from openfold.utils.tensor_utils import (
 from collections import defaultdict
 from openfold.utils.lr_schedulers import AlphaFoldLRScheduler
 
+import logging
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)  # Set to DEBUG for more detailed logs if needed
+sh = logging.StreamHandler(sys.stdout)
+sh.setLevel(logging.INFO)  # Adjust logging level here
+formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+sh.setFormatter(formatter)
+logger.addHandler(sh)
+
 class Model(pl.LightningModule):
-    def __init__(config, args):
+    def __init__(self, config, args):
+        super().__init__()
         self.model = AlphaFold(config)
+        self.args = args
         pass
 
     def noise(self, batch):
         device = batch['aatype'].device
-        batch_dims = batch['all_atom_positions'].shape
+        batch_dims = batch[''].shape
         ny = self.harmonic_prior.sample(batch_dims)
         t = torch.rand(batch_dims, device=device)
         noised_structure = (1 - t[:,None,None]) * batch['all_atom_position'] + t[:,None,None] * ny
@@ -73,7 +80,7 @@ class Model(pl.LightningModule):
             with torch.no_grad():
                 outputs = self.model(batch[0])
 
-        batch['temp_pos'] = batch_idx
+        # batch['temp_pos'] = batch_idx
         
         outputs = self.model(batch[0], prev_outputs=outputs)
 
@@ -158,14 +165,10 @@ class Model(pl.LightningModule):
         # t = torch.rand(batch_dims, device=device)
         # noised_structure = (1 - t[:,None,None]) * batch['all_atom_position'] + t[:,None,None] * ny
         
-        
-
-
         if noisy_first:
             batch['noised_structure'] = ny
             batch['t'] = torch.ones(1, device=noisy.device)
             
-
                  
         if no_diffusion:
             output = self.model(batch)
@@ -196,6 +199,21 @@ class Model(pl.LightningModule):
             return prots
         else:
             return outputs
+    
+    def configure_optimizers(self):
+        optimizer = torch.optim.Adam(
+            filter(lambda p: p.requires_grad, self.model.parameters())
+        )
+        
+        lr_scheduler = AlphaFoldLRScheduler(optimizer, max_lr=self.args.lr)
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": lr_scheduler,
+                "interval": "step",
+                "name": "AlphaFoldLRScheduler",
+            }
+        }
 
 
 

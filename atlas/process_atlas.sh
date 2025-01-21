@@ -3,9 +3,9 @@
 #SBATCH --output=output_%j.txt        # Output file, %j will be replaced with the job ID
 #SBATCH --error=error_%j.txt          # Error file, %j will be replaced with the job ID
 #SBATCH --ntasks=1                  # Number of tasks (processes)
-#SBATCH --cpus-per-task=32             # Number of CPU cores per task
+#SBATCH --cpus-per-task=50           # Number of CPU cores per task
 #SBATCH --mem=50G                     # Memory per node
-#SBATCH --time=10:00:00               # Time limit hrs:min:sec
+#SBATCH --time=24:00:00               # Time limit hrs:min:sec
 #SBATCH --partition=all               # Partition name
 
 # -----------------------------------
@@ -19,7 +19,7 @@ conda activate shah_mdflow
 S3_BUCKET="mdflow.atlas"
 
 # Download and process each dataset
-for name in $(cat /cbica/home/shahroha/projects/AF-DIT/atlas/atlas_p10.csv | grep -v name | awk -F ',' '{print $1}'); do
+for name in $(cat /cbica/home/shahroha/projects/AF-DIT/atlas/atlas_part20.csv | grep -v name | awk -F ',' '{print $1}'); do
     wget https://www.dsimb.inserm.fr/ATLAS/database/ATLAS/${name}/${name}_protein.zip
     mkdir -p ${name}
     unzip ${name}_protein.zip -d ${name}

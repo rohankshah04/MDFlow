@@ -44,16 +44,19 @@ def do_job(name):
     traj = ref + traj
     f, temp_path = tempfile.mkstemp(); os.close(f)
     positions_stacked = []
-    for i in tqdm.trange(0, len(traj), 100):
+    masks_stacked = []
+    for i in tqdm.trange(0, len(traj), 10):
         traj[i].save_pdb(temp_path)
     
         with open(temp_path) as f:
             prot = from_pdb_string(f.read())
             pdb_feats = make_protein_features(prot, name)
             positions_stacked.append(pdb_feats['all_atom_positions'])
+            masks_stacked.append(pdb_feats['all_atom_mask'])
             
     
     pdb_feats['all_atom_positions'] = np.stack(positions_stacked)
+    pdb_feats['all_atom_mask'] = np.stack(masks_stacked)
     print({key: pdb_feats[key].shape for key in pdb_feats})
     np.savez(f"{args.outdir}/{name}.npz", **pdb_feats)
     os.unlink(temp_path)

@@ -794,7 +794,7 @@ multimer_config_update = mlc.ConfigDict({
                 ],
                 "true_msa": [NUM_MSA_SEQ, NUM_RES]
             },
-            "max_recycling_iters": 20,  # For training, value is 3
+            "max_recycling_iters": 3,  # For training, value is 3
             "unsupervised_features": [
                     "aatype",
                     "residue_index",

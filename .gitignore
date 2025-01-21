@@ -2,3 +2,7 @@ __pycache__/
 *.__pycache__
 
 openfold/
+
+MSA/
+alignment_dir/
+wandb/
