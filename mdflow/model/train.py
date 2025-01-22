@@ -18,6 +18,7 @@ from openfold.utils.exponential_moving_average import ExponentialMovingAverage
 from openfold.utils.validation_metrics import drmsd, gdt_ts, gdt_ha
 from openfold.utils.tensor_utils import tensor_tree_map
 from openfold.np import residue_constants
+from torch.utils.data import Dataset, DataLoader
 
 import logging
 logger = logging.getLogger(__name__)
@@ -73,7 +74,7 @@ def parse_args():
     parser.add_argument('--wandb_project', type=str, default='mdflow')
     parser.add_argument('--wandb_entity', type=str, default=os.environ.get("WANDB_ENTITY"))
     parser.add_argument('--run_name', type=str, default='mdflow_overfit')
-    parser.add_argument('--num_workers', type=int, default=2)
+    parser.add_argument('--num_workers', type=int, default=0)
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints')
     parser.add_argument('--ckpt_freq', type=int, default=1)
     parser.add_argument('--val_freq', type=int, default=1)
@@ -83,11 +84,19 @@ def parse_args():
     parser.add_argument('--overfit_samples', type=int, default=2, 
                       help='Number of samples to overfit on')
     parser.add_argument('--msa_dir', type=str, default='/cbica/home/shahroha/projects/AF-DIT/atlas/MSA')
+    parser.add_argument('--val_samples', type=int, default=2)
     return parser.parse_args()
 
 def load_msa_data(pt_file_path):
     msa_data = torch.load(pt_file_path)
     return msa_data['msa'], msa_data['deletion_matrix']
+
+def calculate_b_factors(atom_positions):
+    if isinstance(atom_positions, torch.Tensor):
+        atom_positions = atom_positions.numpy()
+    coordinate_variance = np.var(atom_positions, axis=-1)
+    b_factors = np.array(8 * np.pi ** 2 / 3) * coordinate_variance
+    return b_factors
     
 class ProteinTrajectoryDataset(Dataset):
     def __init__(self, trajectory_folders, alignment_dir="/cbica/home/shahroha/projects/AF-DIT/atlas/alignment_dir/"):
@@ -116,18 +125,20 @@ class ProteinTrajectoryDataset(Dataset):
             protein_id = os.path.splitext(os.path.basename(data_path))[0]
             
             # Load trajectory data
-            with np.load(data_path) as data:
+            with np.load(data_path, allow_pickle=True) as data:
                 # Load MSA data
                 msa_pt_file = os.path.join(self.alignment_dir, f"{protein_id}_msa_features.pt")
                 msa, deletion_matrix = load_msa_data(msa_pt_file)
-                
+                logger.info(f"data shsape: {data.files}")
                 # Store trajectory metadata
+
                 trajectory_data = {
+                    'name': data['domain_name'][0].decode('utf-8'),
+                    'aatype': data['aatype'],
                     'positions': data['all_atom_positions'],
                     'masks': data['all_atom_mask'],
-                    'aatype': data['aatype'],
                     'residue_index': data['residue_index'],
-                    'chain_index': data.get('chain_index'),
+                    'seq_length': data['seq_length'],
                     'msa': msa,
                     'deletion_matrix': deletion_matrix,
                     'protein_idx': folder_idx
@@ -157,33 +168,45 @@ class ProteinTrajectoryDataset(Dataset):
         traj = self.snapshot_pairs[traj_idx]
         
         # Create input features (batch[0])
+        b_factors = calculate_b_factors(traj['positions'][t])
+        b_factors_target = calculate_b_factors(traj['positions'][t + 1])
+
+
         input_data = {
+            'name': traj['name'],
             'all_atom_positions': torch.from_numpy(traj['positions'][t]).float(),
             'all_atom_mask': torch.from_numpy(traj['masks'][t]).float(),
             'aatype': torch.from_numpy(traj['aatype']).long(),
             'residue_index': torch.from_numpy(traj['residue_index']).long(),
-            'temp_pos': t,
+            'seq_length': torch.from_numpy(traj['seq_length']).long(),
+            't': t,
             'protein_idx': torch.tensor(traj['protein_idx']).long(),
             'msa': traj['msa'],
-            'deletion_matrix': traj['deletion_matrix']
+            'deletion_matrix': traj['deletion_matrix'],
+            'plddt': torch.from_numpy(b_factors).float(),
+            'prev_outputs': None
         }
         
         # Optional fields
-        if traj['chain_index'] is not None:
-            input_data['chain_index'] = torch.from_numpy(traj['chain_index']).long()
-        if traj['b_factors'] is not None:
-            input_data['b_factors'] = torch.from_numpy(traj['b_factors']).float()
+        # if traj['b_factors'] is not None:
+        #     input_data['b_factors'] = torch.from_numpy(traj['b_factors']).float()
             
         # Create target data (batch[1])
         target_data = {
+            'name': traj['name'],
+            'aatype': torch.from_numpy(traj['aatype']).long(),
+            'residue_index': torch.from_numpy(traj['residue_index']).long(),
             'all_atom_positions': torch.from_numpy(traj['positions'][t + 1]).float(),
             'all_atom_mask': torch.from_numpy(traj['masks'][t + 1]).float(),
+            'seq_length': torch.from_numpy(traj['seq_length']).long(),
+            'plddt': torch.from_numpy(b_factors_target).float(),
+            'prev_outputs': None
         }
         
         return input_data, target_data
 
-    def get_protein_dataloader(trajectory_folders, batch_size=1, num_workers=4):
-        dataset = ProteinTrajectoryDataset(trajectory_folders)
+def get_protein_dataloader(trajectory_folders, batch_size=1, num_workers=0):
+    dataset = ProteinTrajectoryDataset(trajectory_folders)
     
     def collate_fn(batch):
         """Custom collate function to handle dictionary data"""
@@ -195,18 +218,36 @@ class ProteinTrajectoryDataset(Dataset):
             if key in ['msa', 'deletion_matrix']:  # Special handling for MSA data if needed
                 input_batch[key] = [item[0][key] for item in batch]
             else:
-                input_batch[key] = torch.stack([item[0][key] for item in batch])
+                elements = [item[0][key] for item in batch]
+                if isinstance(elements[0], int):
+                    elements = [torch.tensor(elem) for elem in elements]
+                    input_batch[key] = torch.stack(elements)
+                elif isinstance(elements[0], str):
+                    input_batch[key] = elements
+                elif elements[0] is None:
+                    input_batch[key] = elements
+                else:
+                    input_batch[key] = torch.stack(elements)
         
         # Combine all target features
         for key in batch[0][1].keys():
-            target_batch[key] = torch.stack([item[1][key] for item in batch])
+            elements = [item[1][key] for item in batch]
+            if isinstance(elements[0], int):
+                elements = [torch.tensor(elem) for elem in elements]
+                target_batch[key] = torch.stack(elements)
+            elif isinstance(elements[0], str):
+                target_batch[key] = elements
+            elif elements[0] is None:
+                target_batch[key] = elements
+            else:
+                target_batch[key] = torch.stack(elements)
         
         return input_batch, target_batch
     
     return DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=False,
         num_workers=num_workers,
         collate_fn=collate_fn,
         pin_memory=True
@@ -237,7 +278,6 @@ def main():
     logger.info(f"paths to folders are: {train_trajectory_folders}")
     train_loader = get_protein_dataloader(train_trajectory_folders)
     val_loader = train_loader
-    logger.info(f"dataset length: {len(dataloader)}")
     
     model = Model(config, args)
     

@@ -42,6 +42,11 @@ class Model(pl.LightningModule):
         super().__init__()
         self.model = AlphaFold(config)
         self.args = args
+        self.cached_weights = None
+        self.iter_step = 0
+        self.HarmonicPrior = HarmonicPrior(config.data.train.crop_size)
+        self.generator = torch.Generator().manual_seed(137)
+        self.last_log_time = time.time()
         pass
 
     def noise(self, batch):
@@ -81,8 +86,8 @@ class Model(pl.LightningModule):
                 outputs = self.model(batch[0])
 
         # batch['temp_pos'] = batch_idx
-        
-        outputs = self.model(batch[0], prev_outputs=outputs)
+        batch[0]['prev_outputs'] = outputs
+        outputs = self.model(batch[0])
 
         loss, loss_breakdown = self.loss(outputs, batch[1], _return_breakdown=True)
 
@@ -107,13 +112,16 @@ class Model(pl.LightningModule):
         
         self.iter_step += 1
         self.stage = 'val'
-            
-        ref_prot = batch['ref_prot'][0]
-        
+        batch[1]['aatype'] = torch.argmax(batch[1]['aatype'], dim=-1)
+        logger.info(f"shape of aatype: {batch[1]['aatype'].shape}")
+
+        ref_prot = protein.output_to_protein(batch[1])
         pred_prots = []
+
         for _ in range(self.args.val_samples):
-            prots = self.inference(batch, as_protein=True)
-            pred_prots.append(prots[-1])
+            prots = self.inference(batch[0], as_protein=True)
+            proteins = protein.output_to_protein(prots)
+            pred_prots.append(proteins[-1])
 
         first_metrics = protein.global_metrics(ref_prot, prots[0])
         for key in first_metrics:
@@ -156,12 +164,12 @@ class Model(pl.LightningModule):
         clone_param = lambda t: t.detach().clone()
         self.cached_weights = tensor_tree_map(clone_param, self.model.state_dict())
         self.model.load_state_dict(self.ema.state_dict()["params"])
-        
+        logger.info('Finished loading EMA weights')
     
     def inference(self, batch, as_protein=False, no_diffusion=False, self_cond=True, noisy_first=False, schedule=None):
         device = batch['aatype'].device
-        batch_dims = batch['all_atom_positions'].shape
-        ny = HarmonicPrior.sample(batch_dims)
+        batch_dims = batch['all_atom_positions'].shape[0]
+        ny = HarmonicPrior(batch_dims)
         # t = torch.rand(batch_dims, device=device)
         # noised_structure = (1 - t[:,None,None]) * batch['all_atom_position'] + t[:,None,None] * ny
         
@@ -169,9 +177,10 @@ class Model(pl.LightningModule):
             batch['noised_structure'] = ny
             batch['t'] = torch.ones(1, device=noisy.device)
             
-                 
         if no_diffusion:
+            logger.info(f"making call to model for inference")
             output = self.model(batch)
+            logger.info(f"received output from model for inference")
             if as_protein:
                 return protein.output_to_protein({**output, **batch})
             else:
@@ -180,16 +189,18 @@ class Model(pl.LightningModule):
         if schedule is None:
             schedule = np.array([1.0, 0.75, 0.5, 0.25, 0.1, 0]) 
         outputs = []
-        prev_outputs = None
         for t, s in zip(schedule[:-1], schedule[1:]):
-            output = self.model(batch, prev_outputs=prev_outputs)
+            logger.info(f"making call to model for inference")
+            logger.info(f"original batch keys: {batch.keys()}")
+            output = self.model(batch)
+            logger.info(f"received output from model for inference")
             outputs.append({**output, **batch})
             
             ny = (s / t) * ny + (1 - s / t) * batch['all_atom_position']
             batch['noised_struture'] = ny
             batch['t'] = torch.ones(1, device=ny.device) * s # first one doesn't get the time embedding, last one is ignored :)
             if self_cond:
-                prev_outputs = output
+                batch['prev_outputs'] = outputs
 
         del batch['noised_structure'], batch['t']
         if as_protein:

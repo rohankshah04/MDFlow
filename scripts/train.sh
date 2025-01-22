@@ -10,7 +10,7 @@
 #SBATCH --time=20:00:00               # Time limit hrs:min:sec
 #SBATCH --partition=all               # Partition name
 
-ulimit -n 65636
+ulimit -n 65536
 unlimit -s unlimited
 
 # Load the necessary modules (if any)
@@ -21,6 +21,8 @@ conda init bash
 source ~/.bashrc
 source ~/anaconda3/etc/profile.d/conda.sh  # Ensure conda command is available
 conda activate shah_mdflow
+
+# export OMP_NUM_THREADS=1
 
 export WANDB_API_KEY="8ac276ce003c8b51424e5c554ad85d4beb7cdbaa"
 export WANDB_PROJECT="mdflow"

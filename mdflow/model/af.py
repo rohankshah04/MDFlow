@@ -47,6 +47,13 @@ from openfold.utils.tensor_utils import add
 
 from misc import InputPairStack, GaussianFourierProjection, Linear
 
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)  # Set to DEBUG for more detailed logs if needed
+sh = logging.StreamHandler(sys.stdout)
+sh.setLevel(logging.INFO)  # Adjust logging level here
+formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+sh.setFormatter(formatter)
+logger.addHandler(sh)
 
 def sinusoidal_time_embedding(time_values, embed_dim):
     """
@@ -94,13 +101,13 @@ class AlphaFold(nn.Module):
     Implements Algorithm 2 (but with training).
     """
 
-    def __init__(self, config, extra_input=False):
+    def __init__(self, config, extra_input=True):
         """
         Args:
             config:
                 A dict-like config object (like the one in config.py)
         """
-        super(AlphaFold, self).__init__()
+        super().__init__()
 
         self.globals = config.globals
         self.config = config.model
@@ -195,10 +202,10 @@ class AlphaFold(nn.Module):
         inp_z = self.extra_input_pair_embedding(dgram * mask.unsqueeze(-1))
         inp_z = self.extra_input_pair_stack(inp_z, mask, chunk_size=None)
         return inp_z
-
     
-    def forward(self, batch, prev_outputs=None):
-
+    def forward(self, batch):
+        prev_outputs = batch.pop('prev_outputs')
+        logger.info(f"batch shape without prev outputs: {batch.keys()}")
         feats = batch
 
         # Primary output dictionary
@@ -244,6 +251,7 @@ class AlphaFold(nn.Module):
             x_prev = z.new_zeros((*batch_dims, n, residue_constants.atom_type_num, 3), requires_grad=False)
 
         else:
+            logger.info(f"prev outputs exist: {prev_outputs['m_1_prev'].shape}")
             m_1_prev, z_prev, x_prev = prev_outputs['m_1_prev'], prev_outputs['z_prev'], prev_outputs['x_prev']
 
         x_prev = pseudo_beta_fn(

@@ -61,8 +61,11 @@ class Protein:
 def output_to_protein(output):
     """Returns the pbd (file) string from the model given the model output."""
     output = tensor_tree_map(lambda x: x.cpu().numpy(), output)
-    final_atom_positions = output['final_atom_positions']
-    final_atom_mask = output["atom37_atom_exists"]
+    final_atom_positions = output['all_atom_positions']
+    if 'atom37_atom_exists' in output:
+        final_atom_mask = output["atom37_atom_exists"]
+    else:
+        final_atom_mask = output['all_atom_mask']
     pdbs = []
     for i in range(output["aatype"].shape[0]):
         unk_idx = residue_constants.restype_order_with_x["X"]
