@@ -85,12 +85,18 @@ def output_to_protein(output):
         pdbs.append(pred)
     return pdbs
 
+def to_numpy(x):
+    if hasattr(x, 'cpu'):
+        return x.cpu().numpy()
+    return np.array(x)
+
 def from_dict(prot):
-    name = prot['domain_name'].item().decode(encoding='utf-8')
-    seq = prot['sequence'].item().decode(encoding='utf-8')
+    name = prot['name']
+    seq = prot['seqres']
+    aatype_raw = to_numpy(prot['aatype'])
     return Protein(
         name=name,
-        aatype=np.nonzero(prot["aatype"])[1],
+        aatype=aatype_raw,
         atom_positions=prot["all_atom_positions"],
         seqres=seq,
         atom_mask=prot["all_atom_mask"],
@@ -152,6 +158,7 @@ def global_metrics(ref_prot, pred_prot, lddt=False, symmetric=False):
         f.write(to_pdb(pred_prot))
     
     out = tmscore(ref_path, pred_path)
+
     if lddt:
         out['lddt'] = my_lddt_func(ref_path, pred_path)
     
@@ -196,9 +203,7 @@ def align_residue_numbering(prot1, prot2, mask=False):
 # trans_ca, rms = superimposition._superimpose_np(ref_ca[mask], pred_ca[mask])
 
 def tmscore(ref_path, pred_path):
-    
-        
-    out = subprocess.check_output(['TMscore', '-seq', pred_path, ref_path], 
+    out = subprocess.check_output(['/cbica/home/shahroha/projects/AF-DIT/scripts/TMscore', '-seq', pred_path, ref_path], 
                     stderr=open('/dev/null', 'w'))
     
     start = out.find(b'RMSD')

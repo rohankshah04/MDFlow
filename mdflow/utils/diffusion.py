@@ -55,6 +55,5 @@ class HarmonicPrior:
         self.P = self.P.to(device)
         self.D_inv = self.D_inv.to(device)
         
-    def sample(self, batch_dims=()):
+    def sample(self, batch_dims=(), extra_dims=1):
         return self.P @ (torch.sqrt(self.D_inv)[:,None] * torch.randn(*batch_dims, self.N, 3, device=self.P.device))
-    

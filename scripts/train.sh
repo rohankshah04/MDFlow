@@ -3,15 +3,15 @@
 #SBATCH --output=output_%j.txt        # Output file, %j will be replaced with the job ID
 #SBATCH --error=error_%j.txt   
 #SBATCH --nodes=1 # Error file, %j will be replaced with the job ID
-#SBATCH --ntasks=1                    # Number of tasks (processes)
+#SBATCH --ntasks=1                   # Number of tasks (processes)
 #SBATCH --cpus-per-task=4    
-#SBATCH --gpus-per-node=a100:1         # Number of CPU cores per task
+#SBATCH --gres=gpu:a100:1         # Number of CPU cores per task
 #SBATCH --mem=32G                     # Memory per node
 #SBATCH --time=20:00:00               # Time limit hrs:min:sec
-#SBATCH --partition=all               # Partition name
+#SBATCH --partition=all  
 
 ulimit -n 65536
-unlimit -s unlimited
+ulimit -s unlimited
 
 # Load the necessary modules (if any)
 # module load anaconda
@@ -20,9 +20,13 @@ unlimit -s unlimited
 conda init bash
 source ~/.bashrc
 source ~/anaconda3/etc/profile.d/conda.sh  # Ensure conda command is available
-conda activate shah_mdflow
+conda activate rohan_mdflow
 
 # export OMP_NUM_THREADS=1
+export CUDA_HOME=$CONDA_PREFIX
+export CUDA_PATH=$CONDA_PREFIX
+export LIBRARY_PATH=$CONDA_PREFIX/lib:$LIBRARY_PATH
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
 
 export WANDB_API_KEY="8ac276ce003c8b51424e5c554ad85d4beb7cdbaa"
 export WANDB_PROJECT="mdflow"
@@ -37,6 +41,9 @@ echo "Current directory: $PWD"
 echo "Project directory: $PROJECT_DIR"
 echo "PYTHONPATH: $PYTHONPATH"
 
+g++ -O3 -o TMscore TMscore.cpp
+
+nvidia-smi 
 # Run your Python script
 python $PROJECT_DIR/mdflow/model/train.py \
     --overfit_samples 2 \

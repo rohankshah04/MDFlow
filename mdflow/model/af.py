@@ -17,6 +17,7 @@
 
 import sys
 import logging
+import math
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -35,8 +36,8 @@ from openfold.model.embedders import (
 from openfold.model.evoformer import EvoformerStack, ExtraMSAStack
 from openfold.model.heads import AuxiliaryHeads
 from openfold.model.structure_module import StructureModule
-
 import openfold.np.residue_constants as residue_constants
+from openfold.model.primitives import Linear
 
 from openfold.utils.feats import (
     pseudo_beta_fn,
@@ -45,7 +46,8 @@ from openfold.utils.feats import (
 )
 from openfold.utils.tensor_utils import add
 
-from misc import InputPairStack, GaussianFourierProjection, Linear
+from input_pair_stack import InputPairStack
+from layers import GaussianFourierProjection
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)  # Set to DEBUG for more detailed logs if needed
@@ -118,7 +120,7 @@ class AlphaFold(nn.Module):
         self.input_embedder = InputEmbedder(
             **self.config["input_embedder"],
         )
-        self.recycling_embedder = RecyclinegEmbedder(
+        self.recycling_embedder = RecyclingEmbedder(
             **self.config["recycling_embedder"],
         )
         
@@ -204,12 +206,17 @@ class AlphaFold(nn.Module):
         return inp_z
     
     def forward(self, batch):
-        prev_outputs = batch.pop('prev_outputs')
-        logger.info(f"batch shape without prev outputs: {batch.keys()}")
+        if 'prev_outputs' in batch:
+            prev_outputs = batch['prev_outputs']
+        else:
+            prev_outputs = {}
         feats = batch
 
         # Primary output dictionary
         outputs = {}
+        logger.info(f"batch keys: {batch.keys()}")
+        logger.info(f"msa_mask shape: {batch['msa_mask'].shape}")
+        logger.info(f"extra_mask_mask shape: {batch['extra_msa_mask'].shape}")
 
         # # This needs to be done manually for DeepSpeed's sake
         # dtype = next(self.parameters()).dtype
@@ -234,7 +241,7 @@ class AlphaFold(nn.Module):
         msa_mask = feats["msa_mask"]
         
         ## Initialize the MSA and pair representations
-
+        logger.info(f"")
         # m: [*, S_c, N, C_m]
         # z: [*, N, N, C_z]
         m, z = self.input_embedder(
@@ -243,17 +250,17 @@ class AlphaFold(nn.Module):
             feats["msa_feat"],
             inplace_safe=inplace_safe,
         )
-        if prev_outputs is None:
+        logger.info(f"dimensions of m after input_embedder: {m.shape}")
+        if prev_outputs is None or prev_outputs == {}:
             m_1_prev = m.new_zeros((*batch_dims, n, self.config.input_embedder.c_m), requires_grad=False)
             # [*, N, N, C_z]
             z_prev = z.new_zeros((*batch_dims, n, n, self.config.input_embedder.c_z), requires_grad=False)
             # [*, N, 3]
             x_prev = z.new_zeros((*batch_dims, n, residue_constants.atom_type_num, 3), requires_grad=False)
-
         else:
-            logger.info(f"prev outputs exist: {prev_outputs['m_1_prev'].shape}")
             m_1_prev, z_prev, x_prev = prev_outputs['m_1_prev'], prev_outputs['z_prev'], prev_outputs['x_prev']
-
+        logger.info(f"dimensions of m_1_prev are {m_1_prev.shape}")
+        logger.info(f"dimensions of noised_struc is {feats['noised_structure'].shape}")
         x_prev = pseudo_beta_fn(
             feats["aatype"], feats["noised_structure"], None
         ).to(dtype=z.dtype)
@@ -268,49 +275,26 @@ class AlphaFold(nn.Module):
         )
 
         # [*, S_c, N, C_m]
+    
         m[..., 0, :, :] += m_1_prev_emb
+        logger.info(f"m dimensions after adding m_1_prev_emb: {m.shape}")
 
         # [*, N, N, C_z]
         z = add(z, z_prev_emb, inplace=inplace_safe)
 
-
         temp_pos = batch['temp_pos']  # shape [B] or [B, 1]
         
-        # let's assume your model config's c_z == c_m
         c_z = self.config.evoformer_stack.c_z
+        c_m = self.config.evoformer_stack.c_m
         # compute time embedding of shape [B, c_z]
-        time_emb = sinusoidal_time_embedding(temp_pos, c_z)  # [B, c_z]
+        # time_emb = sinusoidal_time_embedding(temp_pos, c_m)  # [B, c_m]
 
         # Expand to match z: [B, 1, 1, c_z]
-        time_emb_z = time_emb.unsqueeze(1).unsqueeze(1)
+        time_emb_z = sinusoidal_time_embedding(temp_pos, c_z)
+        time_emb_z = time_emb_z.unsqueeze(1).unsqueeze(1)
         # z: [B, N, N, c_z]
         z = add(z, time_emb_z, inplace=inplace_safe)
-
-        # Expand to match m[..., 0, :, :]: [B, N, c_m]
-        # which is [B, N, c_z] if c_m == c_z
-        time_emb_m = time_emb.unsqueeze(1)  # [B, 1, c_z]
-        # add to m[..., 0, :, :]
-        m[..., 0, :, :] += time_emb_m
     
-        #######################
-        if 'noised_pseudo_beta_dists' in batch:
-            inp_z = self._get_input_pair_embeddings(
-                batch['noised_pseudo_beta_dists'], 
-                batch['pseudo_beta_mask'],
-            )
-            inp_z = inp_z + self.input_time_embedding(self.input_time_projection(batch['t']))[:,None,None]
-            
-        else: # otherwise DDP complains
-            B, L = batch['aatype'].shape
-            inp_z = self._get_input_pair_embeddings(
-                z.new_zeros(B, L, L), 
-                z.new_zeros(B, L),
-            )
-            inp_z = inp_z + self.input_time_embedding(self.input_time_projection(z.new_zeros(B)))[:,None,None]
-
-        z = add(z, inp_z, inplace=inplace_safe)
-
-        #############################
         if self.extra_input:
             if 'extra_all_atom_positions' in batch:
                 extra_pseudo_beta = pseudo_beta_fn(batch['aatype'], batch['extra_all_atom_positions'], None)
@@ -354,13 +338,20 @@ class AlphaFold(nn.Module):
                 del input_tensors
             else:
                 # [*, N, N, C_z]
+                extra_msa_mask = feats["extra_msa_mask"].to(dtype=m.dtype)
+                pair_mask = pair_mask.to(dtype=m.dtype)
 
+                logger.info(f"Before extra_mask_stack")
+                logger.info(f"a: device={a.device}, shape={a.shape}, dtype={a.dtype}")
+                logger.info(f"z: device={z.device}, shape={z.shape}, dtype={z.dtype}")
+                logger.info(f"msa_mask: device={msa_mask.device}, shape={msa_mask.shape}, dtype={msa_mask.dtype}")
+                logger.info(f"pair_mask: device={pair_mask.device}, shape={pair_mask.shape}, dtype={pair_mask.dtype}")
                 z = self.extra_msa_stack(
                     a, z,
-                    msa_mask=feats["extra_msa_mask"].to(dtype=m.dtype),
+                    msa_mask=extra_msa_mask,
                     chunk_size=self.globals.chunk_size,
                     use_lma=self.globals.use_lma,
-                    pair_mask=pair_mask.to(dtype=m.dtype),
+                    pair_mask=pair_mask,
                     inplace_safe=inplace_safe,
                     _mask_trans=self.config._mask_trans,
                 )
@@ -383,10 +374,15 @@ class AlphaFold(nn.Module):
     
             del input_tensors
         else:
+            logger.info(f"Before evoformer")
+            logger.info(f"m: device={m.device}, shape={m.shape}, dtype={m.dtype}")
+            logger.info(f"z: device={z.device}, shape={z.shape}, dtype={z.dtype}")
+            msa_mask = msa_mask.to(dtype=m.dtype)
+            logger.info(f"msa_mask: device={msa_mask.device}, shape={msa_mask.shape}, dtype={msa_mask.dtype}")
             m, z, s = self.evoformer(
                 m,
                 z,
-                msa_mask=msa_mask.to(dtype=m.dtype),
+                msa_mask=msa_mask,
                 pair_mask=pair_mask.to(dtype=z.dtype),
                 chunk_size=self.globals.chunk_size,
                 use_lma=self.globals.use_lma,
@@ -427,5 +423,7 @@ class AlphaFold(nn.Module):
 
         # [*, N, 3]
         outputs['x_prev'] = outputs["final_atom_positions"]
+
+        logger.info(f"shape of outputs['final_atom_positions] are {outputs['final_atom_positions'].shape}")
 
         return outputs

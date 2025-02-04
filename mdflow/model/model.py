@@ -2,7 +2,7 @@
 import torch, os, wandb, time, sys
 import pandas as pd
 
-from openfold.model.model import AlphaFold
+from mdflow.model.af import AlphaFold
 
 from mdflow.utils.loss import AlphaFoldLoss
 from mdflow.utils.diffusion import HarmonicPrior
@@ -44,19 +44,35 @@ class Model(pl.LightningModule):
         self.args = args
         self.cached_weights = None
         self.iter_step = 0
-        self.HarmonicPrior = HarmonicPrior(config.data.train.crop_size)
+        self.harmonic_prior = HarmonicPrior(config.data.train.crop_size)
         self.generator = torch.Generator().manual_seed(137)
         self.last_log_time = time.time()
         pass
+    
+    def transfer_batch_to_device(self, batch, device, dataloader_idx: int):
+        def recursive_to_device(data):
+            if torch.is_tensor(data):
+                return data.to(device)
+            elif isinstance(data, dict):
+                return {k: recursive_to_device(v) for k, v in data.items()}
+            elif isinstance(data, list):
+                return [recursive_to_device(item) for item in data]
+            elif isinstance(data, tuple):
+                return tuple(recursive_to_device(item) for item in data)
+            else:
+                return data
+        return recursive_to_device(batch)
 
     def noise(self, batch):
         device = batch['aatype'].device
-        batch_dims = batch[''].shape
+        batch_dims = batch['seq_length'].shape
+        logger.info(f"all atom pos shape: {batch['all_atom_positions'].shape}")
         ny = self.harmonic_prior.sample(batch_dims)
+        logger.info(f"ny shape: {ny.shape}")
         t = torch.rand(batch_dims, device=device)
-        noised_structure = (1 - t[:,None,None]) * batch['all_atom_position'] + t[:,None,None] * ny
-        
-        batch['noised_structre'] = noised_structure
+        logger.info(f"time shape: {t.shape}")
+        noised_structure = (1 - t) * batch['all_atom_positions'] + t * ny
+        batch['noised_structure'] = noised_structure #should have dims (256, 3) or 
         batch['t'] = t
     
     def training_step(self, batch, batch_idx):
@@ -112,20 +128,22 @@ class Model(pl.LightningModule):
         
         self.iter_step += 1
         self.stage = 'val'
-        batch[1]['aatype'] = torch.argmax(batch[1]['aatype'], dim=-1)
-        logger.info(f"shape of aatype: {batch[1]['aatype'].shape}")
-
-        ref_prot = protein.output_to_protein(batch[1])
+        # batch[1]['aatype'] = torch.argmax(batch[1]['aatype'], dim=-1)
+        # batch[1].pop('temp_pos')
+        logger.info(f"batch1: {batch[1].keys()}")
+        # batch[1]['plddt'] = np.full((len(batch[1]['seqres'][0]), 37), 100)
+        ref_prot = batch[1]['ref_prot'][0]
+        ref_prot.residue_index = ref_prot.residue_index.cpu().numpy()
+        
         pred_prots = []
 
         for _ in range(self.args.val_samples):
-            prots = self.inference(batch[0], as_protein=True)
-            proteins = protein.output_to_protein(prots)
-            pred_prots.append(proteins[-1])
+            prots = self.inference(batch[0], as_protein=True, noisy_first=True, no_diffusion=True)
+            pred_prots.append(prots[-1])
 
         first_metrics = protein.global_metrics(ref_prot, prots[0])
         for key in first_metrics:
-            self.log('first_ref_'+key, [first_metrics[key]])
+            self.log('first_ref_'+key, first_metrics[key])
 
         ref_metrics = []
         for pred_prot in pred_prots:
@@ -136,20 +154,20 @@ class Model(pl.LightningModule):
             pred_prot2 = pred_prots[(i+1) % len(pred_prots)]
             self_metrics.append(protein.global_metrics(pred_prot1, pred_prot2, lddt=True))
         
-        self.log('name', batch['name'])
+        # self.log('name', batch['name'])
         
         ref_metrics = pd.DataFrame(ref_metrics)
         for key in ref_metrics:
-            self.log('mean_ref_'+key, [ref_metrics[key].mean()])
-            self.log('max_ref_'+key, [ref_metrics[key].max()]) 
-            self.log('min_ref_'+key, [ref_metrics[key].min()]) 
+            self.log('mean_ref_'+key, ref_metrics[key].mean())
+            self.log('max_ref_'+key, ref_metrics[key].max()) 
+            self.log('min_ref_'+key, ref_metrics[key].min()) 
         
         self_metrics = pd.DataFrame(self_metrics)
-        for key in self_metrics:
-            self.log('self_'+key, [self_metrics[key].mean()])
+        # for key in self_metrics:
+        #     self.log('self_'+key, [self_metrics[key].mean()])
         
-        if self.args.validate:
-            self.try_print_log()
+        # if self.args.validate:
+        #     self.try_print_log()
 
     def restore_cached_weights(self):
         logger.info('Restoring cached weights')
@@ -168,14 +186,18 @@ class Model(pl.LightningModule):
     
     def inference(self, batch, as_protein=False, no_diffusion=False, self_cond=True, noisy_first=False, schedule=None):
         device = batch['aatype'].device
-        batch_dims = batch['all_atom_positions'].shape[0]
+        batch_dims = batch['all_atom_positions'].shape[1]
+        batch_size = batch['all_atom_positions'].shape[0]
+        logger.info(f"batch_dims are {batch_dims}")
         ny = HarmonicPrior(batch_dims)
+        ny.to(device)
+        noisy = ny.sample()
+        logger.info(f"noisy dims: {noisy.shape}")
         # t = torch.rand(batch_dims, device=device)
-        # noised_structure = (1 - t[:,None,None]) * batch['all_atom_position'] + t[:,None,None] * ny
         
         if noisy_first:
-            batch['noised_structure'] = ny
             batch['t'] = torch.ones(1, device=noisy.device)
+            batch['noised_structure'] = noisy
             
         if no_diffusion:
             logger.info(f"making call to model for inference")
@@ -196,8 +218,8 @@ class Model(pl.LightningModule):
             logger.info(f"received output from model for inference")
             outputs.append({**output, **batch})
             
-            ny = (s / t) * ny + (1 - s / t) * batch['all_atom_position']
-            batch['noised_struture'] = ny
+            ny = (s / t) * ny + (1 - s / t) * batch['all_atom_positions']
+            batch['noised_structure'] = ny
             batch['t'] = torch.ones(1, device=ny.device) * s # first one doesn't get the time embedding, last one is ignored :)
             if self_cond:
                 batch['prev_outputs'] = outputs
@@ -225,11 +247,3 @@ class Model(pl.LightningModule):
                 "name": "AlphaFoldLRScheduler",
             }
         }
-
-
-
-
-
-
-
-

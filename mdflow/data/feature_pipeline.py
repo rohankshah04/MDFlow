@@ -20,8 +20,7 @@ import ml_collections
 import numpy as np
 import torch
 
-from ..model import input_pipeline
-
+from mdflow.data import input_pipeline
 
 FeatureDict = Mapping[str, np.ndarray]
 TensorDict = Dict[str, torch.Tensor]

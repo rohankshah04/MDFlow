@@ -9,15 +9,23 @@ import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import WandbLogger
 import argparse
-from typing import Dict, List
+from typing import Mapping, Optional, Sequence, Any, Dict, List
+import subprocess
+
 
 from model import Model
 from mdflow.data.s3_dataloader import S3DataLoader
 from mdflow.model.config import model_config
+from mdflow.data import data_pipeline
+from mdflow.data.data_pipeline import _aatype_to_str_sequence
+from mdflow.data import feature_pipeline
+from mdflow.utils import protein
+from mdflow.utils.protein import Protein
 from openfold.utils.exponential_moving_average import ExponentialMovingAverage
 from openfold.utils.validation_metrics import drmsd, gdt_ts, gdt_ha
 from openfold.utils.tensor_utils import tensor_tree_map
 from openfold.np import residue_constants
+from openfold.data import parsers
 from torch.utils.data import Dataset, DataLoader
 
 import logging
@@ -87,8 +95,25 @@ def parse_args():
     parser.add_argument('--val_samples', type=int, default=2)
     return parser.parse_args()
 
+def tensorize_features(features) -> Dict[str, torch.Tensor]:
+    """Convert all numpy arrays in the FeatureDict to PyTorch tensors, 
+       casting object arrays to float if necessary."""
+    tensor_dict = {}
+    for key, value in features.items():
+        if isinstance(value, np.ndarray):
+            # If the dtype is object, try converting to float
+            if value.dtype == np.object or value.dtype == np.dtype('O'):
+                value = value.astype(np.float32)
+            # Convert the (now numeric) numpy array to a torch tensor
+            tensor_dict[key] = torch.tensor(value)
+        else:
+            # If it’s not a numpy array, just copy it as-is
+            tensor_dict[key] = value
+    return tensor_dict
+
 def load_msa_data(pt_file_path):
     msa_data = torch.load(pt_file_path)
+    logger.info(f"msa_data info: {msa_data.keys()}")
     return msa_data['msa'], msa_data['deletion_matrix']
 
 def calculate_b_factors(atom_positions):
@@ -99,15 +124,26 @@ def calculate_b_factors(atom_positions):
     return b_factors
     
 class ProteinTrajectoryDataset(Dataset):
-    def __init__(self, trajectory_folders, alignment_dir="/cbica/home/shahroha/projects/AF-DIT/atlas/alignment_dir/"):
+    def __init__(self, trajectory_folders, alignment_dir="/cbica/home/shahroha/projects/AF-DIT/atlas/MSA", mode: str = "train"):
         """
         Args:
             trajectory_folders (list): List of folder paths containing NPZ files
             alignment_dir (str): Directory containing MSA feature files
         """
         self.snapshot_pairs = []
+        self.mode = mode
+
+        valid_modes = ["train", "eval", "predict"]
+        if(self.mode not in valid_modes):
+            raise ValueError(f'mode must be one of {valid_modes}')
+
         self.alignment_dir = alignment_dir
         self._load_trajectories(trajectory_folders)
+        self.data_cfg = data_cfg
+        self.data_pipeline = data_pipeline.DataPipeline(
+            template_featurizer = None
+        )
+        self.feature_pipeline = feature_pipeline.FeaturePipeline(data_cfg)
         
     def _load_trajectories(self, folders):
         logger.info(f"Loading {len(folders)} trajectory folders")
@@ -128,9 +164,12 @@ class ProteinTrajectoryDataset(Dataset):
             with np.load(data_path, allow_pickle=True) as data:
                 # Load MSA data
                 msa_pt_file = os.path.join(self.alignment_dir, f"{protein_id}_msa_features.pt")
-                msa, deletion_matrix = load_msa_data(msa_pt_file)
-                logger.info(f"data shsape: {data.files}")
+                
                 # Store trajectory metadata
+                # aatype_dim = np.argmax(data['aatype'], axis=1)
+                # logger.info(f"aatype_dim: {aatype_dim}")
+
+                # aatype = _aatype_to_str_sequence(aatype_dim)
 
                 trajectory_data = {
                     'name': data['domain_name'][0].decode('utf-8'),
@@ -139,9 +178,9 @@ class ProteinTrajectoryDataset(Dataset):
                     'masks': data['all_atom_mask'],
                     'residue_index': data['residue_index'],
                     'seq_length': data['seq_length'],
-                    'msa': msa,
-                    'deletion_matrix': deletion_matrix,
-                    'protein_idx': folder_idx
+                    'msa': msa_pt_file,
+                    'sequence': data['sequence'][0].decode('utf-8'),
+                    'between_segment_residues': data['between_segment_residues']
                 }
                 
                 self.snapshot_pairs.append(trajectory_data)
@@ -154,56 +193,69 @@ class ProteinTrajectoryDataset(Dataset):
         return total_pairs
 
     def __getitem__(self, idx):
-        # Find which trajectory and which frame pair
+        # Find trajectory and frame pair (keep this part)
         current_idx = idx
         for traj_idx, traj in enumerate(self.snapshot_pairs):
             num_frames = traj['positions'].shape[0]
             num_pairs = num_frames - 1
             if current_idx < num_pairs:
-                # Found the right trajectory
                 t = current_idx
                 break
             current_idx -= num_pairs
         
         traj = self.snapshot_pairs[traj_idx]
         
-        # Create input features (batch[0])
-        b_factors = calculate_b_factors(traj['positions'][t])
-        b_factors_target = calculate_b_factors(traj['positions'][t + 1])
-
-
-        input_data = {
-            'name': traj['name'],
-            'all_atom_positions': torch.from_numpy(traj['positions'][t]).float(),
-            'all_atom_mask': torch.from_numpy(traj['masks'][t]).float(),
-            'aatype': torch.from_numpy(traj['aatype']).long(),
-            'residue_index': torch.from_numpy(traj['residue_index']).long(),
-            'seq_length': torch.from_numpy(traj['seq_length']).long(),
-            't': t,
-            'protein_idx': torch.tensor(traj['protein_idx']).long(),
-            'msa': traj['msa'],
-            'deletion_matrix': traj['deletion_matrix'],
-            'plddt': torch.from_numpy(b_factors).float(),
-            'prev_outputs': None
+        # Create raw features dictionary that combines structure and MSA data
+        mmcif_feats = {
+            'all_atom_positions': traj['positions'][t],  # Current frame
+            'all_atom_mask': traj['masks'][t],
+            'aatype': traj['aatype'],
+            'residue_index': traj['residue_index'],
+            'seq_length': traj['seq_length'],
+            'between_segment_residues': traj['between_segment_residues'],
+            'is_distillation': np.array(0., dtype=np.float32)
         }
         
-        # Optional fields
-        # if traj['b_factors'] is not None:
-        #     input_data['b_factors'] = torch.from_numpy(traj['b_factors']).float()
+        # Process MSA features using the pipeline
+        msa_features = self.data_pipeline._process_msa_feats(
+            f'{self.alignment_dir}/{traj["name"]}', 
+            traj['sequence'],  # Assuming this is your seqres equivalent
+            alignment_index=None
+        )
+        
+        # Combine structure and MSA features
+        data = {**mmcif_feats, **msa_features}
             
-        # Create target data (batch[1])
-        target_data = {
-            'name': traj['name'],
-            'aatype': torch.from_numpy(traj['aatype']).long(),
-            'residue_index': torch.from_numpy(traj['residue_index']).long(),
-            'all_atom_positions': torch.from_numpy(traj['positions'][t + 1]).float(),
-            'all_atom_mask': torch.from_numpy(traj['masks'][t + 1]).float(),
-            'seq_length': torch.from_numpy(traj['seq_length']).long(),
-            'plddt': torch.from_numpy(b_factors_target).float(),
-            'prev_outputs': None
+        # Process features through the pipeline
+        input_feats = self.feature_pipeline.process_features(data, self.mode)
+        input_feats['name'] = traj['name']
+        input_feats['seqres'] = traj['sequence']
+        input_feats['temp_pos'] = t
+        ref_prot_inp = protein.from_dict(input_feats)
+        input_feats['ref_prot'] = ref_prot_inp
+        
+        # Do the same for target frame (t+1)
+        mmcif_feats_target = {
+            'all_atom_positions': traj['positions'][t + 1],  # Next frame
+            'all_atom_mask': traj['masks'][t + 1],
+            'aatype': traj['aatype'],
+            'residue_index': traj['residue_index'],
+            'seq_length': traj['seq_length'],
+            'between_segment_residues': traj['between_segment_residues'],
+            'is_distillation': np.array(0., dtype=np.float32)
         }
         
-        return input_data, target_data
+        data_target = {**mmcif_feats_target, **msa_features}  # Use same MSA features
+        target_feats = self.feature_pipeline.process_features(data_target, self.mode)
+        target_feats['name'] = traj['name']
+        target_feats['seqres'] = traj['sequence']
+        ref_prot_tar = protein.from_dict(target_feats)
+        target_feats['ref_prot'] = ref_prot_tar
+        target_feats['temp_pos'] = t + 1
+
+        logger.info(f"keys in target_feats are: {target_feats.keys()}")
+        
+        return input_feats, target_feats
 
 def get_protein_dataloader(trajectory_folders, batch_size=1, num_workers=0):
     dataset = ProteinTrajectoryDataset(trajectory_folders)
@@ -226,22 +278,32 @@ def get_protein_dataloader(trajectory_folders, batch_size=1, num_workers=0):
                     input_batch[key] = elements
                 elif elements[0] is None:
                     input_batch[key] = elements
+                elif isinstance(elements[0], dict):
+                    input_batch[key] = elements
+                elif isinstance(elements[0], Protein):
+                    input_batch[key] = elements
                 else:
                     input_batch[key] = torch.stack(elements)
         
         # Combine all target features
         for key in batch[0][1].keys():
-            elements = [item[1][key] for item in batch]
-            if isinstance(elements[0], int):
-                elements = [torch.tensor(elem) for elem in elements]
-                target_batch[key] = torch.stack(elements)
-            elif isinstance(elements[0], str):
-                target_batch[key] = elements
-            elif elements[0] is None:
-                target_batch[key] = elements
+            if key in ['msa', 'deletion_matrix']:  # Special handling for MSA data if needed
+                input_batch[key] = [item[0][key] for item in batch]
             else:
-                target_batch[key] = torch.stack(elements)
-        
+                elements = [item[1][key] for item in batch]
+                if isinstance(elements[0], int):
+                    elements = [torch.tensor(elem) for elem in elements]
+                    target_batch[key] = torch.stack(elements)
+                elif isinstance(elements[0], str):
+                    target_batch[key] = elements
+                elif elements[0] is None:
+                    target_batch[key] = elements
+                elif isinstance(elements[0], dict):
+                    target_batch[key] = elements
+                elif isinstance(elements[0], Protein):
+                    target_batch[key] = elements
+                else:
+                    target_batch[key] = torch.stack(elements)
         return input_batch, target_batch
     
     return DataLoader(
@@ -255,7 +317,10 @@ def get_protein_dataloader(trajectory_folders, batch_size=1, num_workers=0):
 
 def main():
     args = parse_args()
-    
+    logger.info(f"CUDA available: {torch.cuda.is_available()}")
+    logger.info(f"current device: {torch.cuda.current_device()}")
+    logger.info(f"device name: {torch.cuda.get_device_name()}")
+
     # Initialize wandb
     wandb.login(key=os.environ['WANDB_API_KEY'])
     if args.wandb_entity:
@@ -279,47 +344,29 @@ def main():
     train_loader = get_protein_dataloader(train_trajectory_folders)
     val_loader = train_loader
     
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = Model(config, args)
     
     # Load initial AlphaFold weights
-    if os.path.exists('initial_training.pt'):
+    if os.path.exists('/cbica/home/shahroha/projects/AF-DIT/mdflow/model/openfold/resources/openfold_params/initial_training.pt'):
         logger.info("Loading initial AlphaFold weights")
         checkpoint = torch.load('/cbica/home/shahroha/projects/AF-DIT/mdflow/model/openfold/resources/openfold_params/initial_training.pt')
-        model.load_state_dict(checkpoint['state_dict'], strict=False)
-        
-    # Add custom logging callback
-    class ProteinVisualizationCallback(pl.Callback):
-        def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
-            if batch_idx % config['visualization_frequency'] == 0:
-                with torch.no_grad():
-                    current_struct = batch['current']
-                    predicted_struct = outputs['predicted_structure']
-                    target_struct = batch['next']
-                    
-                    # Log metrics and visualizations
-                    metrics = visualize_protein_transition(
-                        current_struct,
-                        predicted_struct,
-                        target_struct,
-                        batch['protein_idx'],
-                        batch['timestep']
-                    )
-                    
-                    trainer.logger.log_metrics(metrics)
-                    
-        def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
-            # Similar visualization for validation batches
-            pass
+        model.load_state_dict(checkpoint, strict=False)
     
+    logger.info(f"device: {device}")
+    model = model.to(device)
+
     # Initialize EMA if needed
     if not args.no_ema:
         model.ema = ExponentialMovingAverage(
             model=model.model,
             decay=0.999
         )
-
+    
+    logger.info(f"model device before training: {next(model.parameters()).device}")
+    
     # Set up PyTorch Lightning trainer with visualization callback
-    trainer = pl.Trainer(
+    trainer = pl.Trainer( 
         accelerator="gpu",
         devices=1,
         max_epochs=args.epochs,
@@ -331,7 +378,6 @@ def main():
                 save_top_k=-1,
                 every_n_epochs=args.ckpt_freq,
             ),
-            ProteinVisualizationCallback()
         ],
         gradient_clip_val=args.grad_clip,
         check_val_every_n_epoch=args.val_freq,
@@ -347,4 +393,5 @@ def main():
     )
 
 if __name__ == "__main__":
+    logger.info(f"torch.version.cuda: {torch.version.cuda}")
     main()
