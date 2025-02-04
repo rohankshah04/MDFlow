@@ -6,3 +6,5 @@ openfold/
 MSA/
 alignment_dir/
 wandb/
+TMscore
+TMscore.cpp
